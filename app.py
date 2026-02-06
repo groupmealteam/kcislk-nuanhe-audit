@@ -5,110 +5,97 @@ from io import BytesIO
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 
-# 1. 網頁基本設定 (使用招牌名稱：一月初)
-st.set_page_config(page_title="一月初 - 輕食菜單稽核系統", layout="wide")
+# 1. 網頁基本設定 (行政專用最高權限)
+st.set_page_config(page_title="林口康橋 - 校方行政稽核系統", layout="wide")
 
-# 設定違規標色 (黃色：針對原則九食材重複)
-YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+# 設定顏色標註
+RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")    # 嚴重違規(禁辣/規格)
+YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid") # 食材重複
 
-def clean_dish_name(text):
-    """提取核心菜名，排除日期、括號、過敏原符號等雜訊"""
+# 合約規格庫 (新北食品)
+CONTRACT_SPECS = {"現撈小卷": "80|100", "無刺白帶魚": "120|150", "手作漢堡排": "150", "手作烤肉串": "80"}
+
+def clean_name(text):
     if pd.isna(text) or re.search(r"\d{1,2}/\d{1,2}", str(text)): return ""
     return "".join(re.findall(r'[\u4e00-\u9fa5]+', str(text)))
 
-def audit_logic(file):
-    try:
-        wb = load_workbook(file)
-        all_sheets = pd.read_excel(file, sheet_name=None, header=None)
-    except:
-        return ["❌ 檔案無法讀取，請確保上傳的是 Excel (.xlsx) 格式。"], None
-
+def admin_audit(file, mode):
+    wb = load_workbook(file)
+    all_sheets = pd.read_excel(file, sheet_name=None, header=None)
     results = []
     output = BytesIO()
-    is_menu_found = False
+    is_valid = False
 
     for sheet_name, df in all_sheets.items():
         df = df.fillna("")
         ws = wb[sheet_name]
         
-        # 定位關鍵行：日期行與主副食行 (鎖定 B 欄的關鍵字)
+        # 定位行座標
         date_row = next((i for i, row in df.iterrows() if any(re.search(r"\d{1,2}/\d{1,2}", str(c)) for c in row)), None)
-        target_rows = [i for i, row in df.iterrows() if any(k in str(row[1]) for k in ["主食", "副菜", "套餐", "麵食", "輕食"])]
+        target_rows = [i for i, row in df.iterrows() if any(k in str(row[1]) for k in ["主食", "副菜", "主菜", "套餐", "麵食"])]
         
-        if date_row is None or not target_rows:
-            continue
-            
-        is_menu_found = True
+        if date_row is None or not target_rows: continue
+        is_valid = True
 
-        # 逐欄審核 (週一至週五)
         for col in range(2, len(df.columns)):
             date_val = str(df.iloc[date_row, col])
+            day_val = str(df.iloc[date_row+1, col]) if (date_row+1) < len(df) else ""
             if not re.search(r"\d{1,2}/\d{1,2}", date_val): continue
             
-            seen_today = {} # 儲存當日已出現的食材核心字
-            daily_soups = [] # 儲存當日 A/B 餐的湯品
+            # --- 行政專用審核邏輯 ---
+            is_restricted_day = any(d in day_val for d in ["週一", "週二", "週四"])
+            seen_today = {}
+            processed_cnt = 0
+            fried_cnt = 0
 
             for r_idx in target_rows:
                 cell_val = str(df.iloc[r_idx, col]).strip()
                 if not cell_val or len(cell_val) < 2: continue
 
-                # A. 收集湯品資訊 (原則：湯品須一致)
-                if "湯" in cell_val or "羹" in cell_val:
-                    daily_soups.append(cell_val)
+                # A. 禁辣日審核 (原則四)
+                if is_restricted_day and ("●" in cell_val or "🌶️" in cell_val):
+                    ws.cell(row=r_idx+1, column=col+1).fill = RED_FILL
+                    results.append({"日期": date_val, "項目": cell_val, "原因": "🚫 禁辣日違規標示"})
 
-                # B. 食材重複稽核 (原則九：避免學生辨識出相同食物)
-                dish_core = clean_dish_name(cell_val)[:2] # 抓取前兩個中文字作為核心
-                if len(dish_core) >= 2:
-                    if dish_core in seen_today:
-                        # 標註當前格子與先前重複的格子
+                # B. 食材重複審核 (原則九)
+                core = clean_name(cell_val)[:2]
+                if len(core) >= 2:
+                    if core in seen_today:
                         ws.cell(row=r_idx+1, column=col+1).fill = YELLOW_FILL
-                        prev_row_idx = seen_today[dish_core]
-                        ws.cell(row=prev_row_idx+1, column=col+1).fill = YELLOW_FILL
-                        
-                        results.append({
-                            "分頁": sheet_name, 
-                            "日期": date_val, 
-                            "項目": cell_val, 
-                            "問題": f"❌ 食材重複：與同日其他餐點「{dish_core}」重複 (原則九)"
-                        })
-                    seen_today[dish_core] = r_idx
+                        ws.cell(row=seen_today[core]+1, column=col+1).fill = YELLOW_FILL
+                        results.append({"日期": date_val, "項目": cell_val, "原因": f"❌ 食材重複({core})"})
+                    seen_today[core] = r_idx
 
-            # C. 湯品一致性檢查
-            if len(set(daily_soups)) > 1:
-                results.append({
-                    "分頁": sheet_name, 
-                    "日期": date_val, 
-                    "項目": "湯品比對", 
-                    "問題": "⚠️ 湯品不一致：A/B餐當日湯品應保持相同，以利行政作業"
-                })
+                # C. 法規標示計數 (原則五/七)
+                if "△" in cell_val: processed_cnt += 1
+                if "◎" in cell_val: fried_cnt += 1
 
-    if not is_menu_found:
-        return ["❌ 偵測失敗：上傳檔案不含日期或主食欄位，請確認是否為『一月初』正式菜單。"], None
+                # D. 新北食品專屬規格檢查
+                for item, spec in CONTRACT_SPECS.items():
+                    if item in cell_val and not re.search(spec, cell_val):
+                        ws.cell(row=r_idx+1, column=col+1).fill = RED_FILL
+                        results.append({"日期": date_val, "項目": cell_val, "原因": f"⚠️ 規格應為 {spec}g"})
+
+            # E. 總結判斷
+            if processed_cnt > 1: results.append({"日期": date_val, "原因": "🚫 加工品(△)超量"})
+            if fried_cnt > 1: results.append({"日期": date_val, "原因": "🚫 油炸(◎)超量"})
 
     wb.save(output)
-    return results, output.getvalue()
+    return results, output.getvalue() if is_valid else (None, None)
 
-# --- 網頁畫面 ---
-st.title("🛡️ 一月初 (暖禾) 輕食菜單自主稽核系統")
+# --- 行政介面 ---
+st.title("🏫 林口康橋：校方行政專用稽核系統")
 st.markdown("---")
-st.info("💡 **自主檢查重點：** 1. 同日 A/B 餐食材重複避讓 (原則九)  2. 湯品一致性檢查。")
+st.sidebar.header("⚙️ 稽核權限設定")
+mode = st.sidebar.selectbox("切換審核對象", ["新北食品 (NTCatering)", "一月初 (暖禾)"])
 
-up = st.file_uploader("👉 請上傳『一月初』菜單 Excel (.xlsx)", type=["xlsx"])
+up = st.file_uploader(f"👉 請上傳【{mode}】待審核菜單", type=["xlsx"])
 
 if up:
-    with st.spinner("一月初 稽核系統分析中..."):
-        logs, final_excel = audit_logic(up)
-        
-        if logs and isinstance(logs[0], str) and logs[0].startswith("❌"):
-            st.error(logs[0])
-        elif logs:
-            st.error(f"🚩 偵測到 {len(logs)} 項衝突或建議，請下載檔案查看：")
-            st.download_button(
-                label="📥 下載『一月初』標註版檔案",
-                data=final_excel,
-                file_name=f"一月初_審核_{up.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            st.table(pd.DataFrame(logs))
-        else:
-            st.success("🎉 審核通過！該週菜單食材配置完美，無重複或衝突。")
+    logs, excel = admin_audit(up, mode)
+    if logs:
+        st.error(f"🚩 偵測到 {len(logs)} 項實質違規，建議退回修正。")
+        st.download_button("📥 下載行政標註檔 (退件回傳用)", excel, f"校方複審_{up.name}")
+        st.table(pd.DataFrame(logs))
+    else:
+        st.success("🎉 完美！該週菜單符合所有校內審閱原則。")
