@@ -8,19 +8,19 @@ from openpyxl.styles import PatternFill
 # 1. 網頁基本設定
 st.set_page_config(page_title="一月初 - 輕食菜單自檢系統", layout="wide")
 YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
 
 def clean_name(text):
     if pd.isna(text): return ""
-    # 只提取中文字，過濾掉英文、數字與符號
+    # 僅提取中文字，過濾掉英文、標點符號與換行
     return "".join(re.findall(r'[\u4e00-\u9fa5]+', str(text)))
 
 def audit_logic(file):
     try:
-        # 強制讀取所有分頁，不設表頭
         wb = load_workbook(file)
         all_sheets = pd.read_excel(file, sheet_name=None, header=None)
     except:
-        return ["❌ 檔案讀取失敗，請確認為 Excel 檔。"], None
+        return ["❌ 檔案讀取失敗，請確認為 Excel (.xlsx) 格式。"], None
 
     results = []
     output = BytesIO()
@@ -30,73 +30,70 @@ def audit_logic(file):
         df = df.fillna("")
         ws = wb[sheet_name]
         
-        # 尋找日期行 (支持 2026/3/30 或 3/30 格式)
+        # 尋找「日期Date」所在行 (對應原始數據)
         date_row_idx = None
         for i, row in df.iterrows():
-            if any(re.search(r"(\d{4}/\d{1,2}/\d{1,2})|(\d{1,2}/\d{1,2})", str(x)) for x in row):
+            if "日期Date" in str(row[2]): # 鎖定 C 欄附近的關鍵字
                 date_row_idx = i
                 break
         
         if date_row_idx is None: continue
         found_menu = True
 
-        # 遍歷每一欄 (週一至週五)
-        for col_idx in range(len(df.columns)):
-            cell_val = str(df.iloc[date_row_idx, col_idx])
-            # 確認這是一欄日期的開頭
-            if not re.search(r"(\d{4}/\d{1,2}/\d{1,2})|(\d{1,2}/\d{1,2})", cell_val): continue
+        # 掃描週一到週五 (C 欄到 G 欄，即 index 3 到 7)
+        for col_idx in range(3, 8):
+            date_val = str(df.iloc[date_row_idx, col_idx]) # 抓取如 2026-03-30
+            day_label = str(df.iloc[date_row_idx + 1, col_idx]) # 抓取週幾
             
-            seen_today = {} # 記錄當天核心字
+            seen_today = {} # 記錄食材
             
-            # 從日期行往下掃描 20 行 (確保涵蓋 A餐、B餐、湯品、水果)
-            for r_offset in range(1, 25):
-                r_idx = date_row_idx + r_offset
+            # 從「主食」行開始向下掃描至「水果」行為止 (約 10-15 行)
+            for r_idx in range(date_row_idx + 3, date_row_idx + 15):
                 if r_idx >= len(df): break
                 
-                dish_text = str(df.iloc[r_idx, col_idx]).strip()
-                
-                # 過濾無效字眼：太短的、純數字(熱量)、或是只有「週一/週二」
-                if len(dish_text) < 2 or dish_text.isdigit() or "週" in dish_text: continue
-                # 過濾掉成分說明 (通常很長且含逗號)
-                if "、" in dish_text and len(dish_text) > 10: continue
+                cell_val = str(df.iloc[r_idx, col_idx]).strip()
+                # 排除空值、過短字、或純熱量數字
+                if len(cell_val) < 2 or cell_val.replace('.','').isdigit(): continue
+                # 排除「食材內容」描述列
+                if "、" in cell_val: continue
 
-                # 提取核心字眼 (例如：沙茶豬肉燴飯 -> 沙茶豬肉)
-                core = clean_name(dish_text)[:4] 
+                # A. 禁辣日稽核 (原則四：週一二四)
+                if any(d in day_label for d in ["週一", "週二", "週四"]):
+                    if "●" in cell_val or "🌶️" in cell_val:
+                        ws.cell(row=r_idx+1, column=col_idx+1).fill = RED_FILL
+                        results.append({"分頁": sheet_name, "日期": date_val, "項目": cell_val, "原因": "🚫 禁辣日標示違規"})
+
+                # B. 食材重複稽核 (原則九)
+                core = clean_name(cell_val)[:2] # 抓取前兩個中文字
                 if len(core) >= 2:
                     if core in seen_today:
-                        # 標註重複
                         ws.cell(row=r_idx+1, column=col_idx+1).fill = YELLOW_FILL
                         prev_r = seen_today[core]
                         ws.cell(row=prev_r+1, column=col_idx+1).fill = YELLOW_FILL
-                        
-                        results.append({
-                            "分頁": sheet_name,
-                            "日期": cell_val,
-                            "項目": dish_text,
-                            "問題": f"❌ 食材重複：與同日項目「{core}」衝突"
-                        })
+                        results.append({"分頁": sheet_name, "日期": date_val, "項目": cell_val, "原因": f"❌ 食材重複({core})"})
                     seen_today[core] = r_idx
 
     if not found_menu:
-        return ["❌ 偵測失敗：找不到日期格式 (如 2026/3/30)。請檢查檔案。"], None
+        return ["❌ 偵測失敗：找不到『日期Date』關鍵欄位，請檢查菜單格式。"], None
 
     wb.save(output)
     return results, output.getvalue()
 
-# --- 介面 ---
+# --- 介面呈現 ---
 st.title("🛡️ 一月初 (暖禾) 輕食菜單自主稽核系統")
 st.markdown("---")
-st.info("💡 **一月初專用版**：支援 2026/3/30 格式，自動掃描全欄位食材重複。")
+st.info("💡 **一月初專用版**：已針對 2026-03-30 格式優化，自動檢查禁辣日與食材重複。")
 
-up = st.file_uploader("👉 請上傳『一月初』菜單 Excel", type=["xlsx"])
+up = st.file_uploader("👉 請上傳『一月初』週菜單 Excel", type=["xlsx"])
 
 if up:
-    logs, final_file = audit_logic(up)
-    if logs and isinstance(logs[0], str) and "❌" in logs[0]:
-        st.error(logs[0])
-    elif logs:
-        st.error(f"🚩 偵測到 {len(logs)} 項重複！")
-        st.download_button("📥 下載【一月初】標註結果", final_file, f"一月初審核_{up.name}")
-        st.table(pd.DataFrame(logs))
-    else:
-        st.success("🎉 完美！這份菜單沒有食材重複衝突。")
+    with st.spinner("正在依照康橋審閱原則分析菜單..."):
+        logs, final_file = audit_logic(up)
+        if logs and isinstance(logs[0], str) and "❌" in logs[0]:
+            st.error(logs[0])
+        elif logs:
+            st.error(f"🚩 偵測到 {len(logs)} 項違規，請下載標註檔：")
+            st.download_button("📥 下載一月初稽核結果", final_file, f"一月初審核_{up.name}")
+            st.table(pd.DataFrame(logs))
+        else:
+            st.success("🎉 完美！這份一月初菜單符合所有審閱原則。")
