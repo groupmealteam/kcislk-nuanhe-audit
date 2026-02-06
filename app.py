@@ -3,27 +3,33 @@ import pandas as pd
 import re
 from io import BytesIO
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font
+from openpyxl.styles import PatternFill, Font, Alignment
 
 # 1. 網頁基本設定
 st.set_page_config(page_title="輕食區(一月初) 菜單自主稽核系統", layout="wide")
 
-# --- 重新定義【高對比】視覺規範 ---
-# 1. 食材重複：黃底紅字 (維持您的要求)
+# --- 定義【30級字 + 微軟正黑體】視覺規範 ---
+FONT_NAME = "微軟正黑體"
+FONT_SIZE = 30
+
+# 1. 食材重複：黃底紅字
 REPEAT_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-REPEAT_FONT = Font(color="FF0000", bold=True)
+REPEAT_FONT = Font(name=FONT_NAME, size=FONT_SIZE, color="FF0000", bold=True)
 
-# 2. 熱量異常：淺粉色底 + 深紫色字 (柔和且清晰)
-CALORIE_FILL = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid") # 改用淺橘粉
-CALORIE_FONT = Font(color="963634", bold=True)
+# 2. 熱量異常：粉色底深紅字
+CALORIE_FILL = PatternFill(start_color="FFCCFF", end_color="FFCCFF", fill_type="solid")
+CALORIE_FONT = Font(name=FONT_NAME, size=FONT_SIZE, color="800000", bold=True)
 
-# 3. 份數異常：淺紅色底 + 深紅色粗體 (取代深紅底，保證數字清晰)
-PORTION_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid") 
-PORTION_FONT = Font(color="9C0006", bold=True)
+# 3. 份數異常：紅色底白字
+PORTION_FILL = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+PORTION_FONT = Font(name=FONT_NAME, size=FONT_SIZE, color="FFFFFF", bold=True)
 
-# 4. 其他異常：淺黃色底 + 黑色字
+# 4. 其他異常：淺黃底黑字
 OTHER_FILL = PatternFill(start_color="FFFFE0", end_color="FFFFE0", fill_type="solid")
-OTHER_FONT = Font(color="000000", bold=False)
+OTHER_FONT = Font(name=FONT_NAME, size=FONT_SIZE, color="000000", bold=True)
+
+# 中央對齊 (讓大字體不被格線切到)
+CENTER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 STANDARD = {"熱量": (750, 850), "全榖": 4.0, "蛋白質": 4.0, "蔬菜": 2.0}
 
@@ -49,7 +55,7 @@ def audit_process(file):
             day_val = str(df.iloc[date_row+1, col])
             if "202" not in date_val: continue
 
-            # --- 1. 食材重複性 (黃底紅字) ---
+            # --- 1. 食材重複性稽核 ---
             idx_A = date_row + 3
             main_A = clean_name(df.iloc[idx_A, col])
             idx_B = None
@@ -65,9 +71,10 @@ def audit_process(file):
                         cell = ws.cell(row=r+1, column=col+1)
                         cell.fill = REPEAT_FILL
                         cell.font = REPEAT_FONT
-                    results.append({"日期": date_val, "項目": "食材重複", "原因": f"黃底紅字：A/B餐主食重複({main_A[:2]})"})
+                        cell.alignment = CENTER_ALIGN
+                    results.append({"日期": date_val, "項目": "食材重複", "原因": "⚠️ A/B餐重複"})
 
-            # --- 2. 營養標示 (視覺強化版) ---
+            # --- 2. 營養標示稽核 ---
             for r_idx in range(date_row + 10, len(df)):
                 label = str(df.iloc[r_idx, 2])
                 try:
@@ -76,16 +83,18 @@ def audit_process(file):
                     if "熱量" in label and (val < STANDARD["熱量"][0] or val > STANDARD["熱量"][1]):
                         cell.fill = CALORIE_FILL
                         cell.font = CALORIE_FONT
-                        results.append({"日期": date_val, "項目": "熱量", "原因": "淺橘底：熱量異常"})
+                        cell.alignment = CENTER_ALIGN
+                        results.append({"日期": date_val, "項目": "熱量", "原因": "粉底：熱量異常"})
                     elif any(x in label for x in ["全榖", "豆魚蛋肉", "蔬菜"]):
                         key = "全榖" if "全榖" in label else "蛋白質" if "豆魚" in label else "蔬菜"
                         if val < STANDARD.get(key, 0):
                             cell.fill = PORTION_FILL
                             cell.font = PORTION_FONT
-                            results.append({"日期": date_val, "項目": key, "原因": "淺紅底：份數不足"})
+                            cell.alignment = CENTER_ALIGN
+                            results.append({"日期": date_val, "項目": key, "原因": "紅底白字：份數不足"})
                 except: continue
 
-            # --- 3. 禁辣日 (淺黃底) ---
+            # --- 3. 禁辣日審核 ---
             if any(d in day_val for d in ["週一", "週二", "週四"]):
                 for r_idx in range(date_row + 2, date_row + 15):
                     if "水果" in str(df.iloc[r_idx, 2]): continue
@@ -94,6 +103,7 @@ def audit_process(file):
                         cell = ws.cell(row=r_idx+1, column=col+1)
                         cell.fill = OTHER_FILL
                         cell.font = OTHER_FONT
+                        cell.alignment = CENTER_ALIGN
                         results.append({"日期": date_val, "項目": "禁辣日", "原因": "淺黃底：標示違規"})
 
     wb.save(output)
@@ -101,14 +111,14 @@ def audit_process(file):
 
 # --- 介面 ---
 st.title("🛡️ 輕食區(一月初) 菜單自主稽核系統")
-st.caption("製作者：Alison / 版本：V5.1")
+st.caption("製作者：Alison / 版本：V5.2 (大字體強化版)")
 
 st.markdown("""
-### 🎨 標註說明 (高對比清晰版)
-* **黃底紅字**：食材重複 (A/B 餐道主食雷同)
-* **淺橘底深紅字**：熱量異常 (低於 750 或高於 850)
-* **淺紅底深紅字**：份數不足 (教育部基準不達標)
-* **淺黃底黑字**：其他異常 (如禁辣日標示錯誤)
+### 🎨 標註規範 (30級微軟正黑體)
+* **紅底白字**：份數不足 (保證一眼看清)
+* **粉底深紅字**：熱量異常
+* **黃底紅字**：食材重複
+* **淺黃底黑字**：禁辣日違規
 """)
 
 up = st.file_uploader("👉 上傳菜單 Excel", type=["xlsx"])
@@ -116,7 +126,7 @@ if up:
     logs, data = audit_process(up)
     if logs:
         st.error(f"🚩 偵測到 {len(logs)} 項異常項目")
-        st.download_button("📥 下載退件標註檔", data, f"稽核報告_{up.name}")
+        st.download_button("📥 下載標註檔案", data, f"稽核報告_{up.name}")
         st.table(pd.DataFrame(logs))
     else:
         st.success("🎉 完美！通過所有稽核。")
