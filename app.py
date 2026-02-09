@@ -1,121 +1,103 @@
 import streamlit as st
 import pandas as pd
-import re
 from io import BytesIO
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font
 
-# 1. 網頁基本設定
-st.set_page_config(page_title="輕食區(一月初) 菜單自主稽核系統", layout="wide")
+# --- 1. 標題與基礎設定 (Alison 規範) ---
+ST_TITLE = "🛡️ 團膳區(新北食品) 菜單自主稽核系統"
+ST_AUTHOR = "製作者：Alison"
+STYLE_ERR = {
+    "fill": PatternFill("solid", fgColor="000000"), 
+    "font": Font(name="微軟正黑體", size=12, color="FFFFFF", bold=True)
+}
 
-# --- 定義視覺規範 (30級字 + 微軟正黑體) ---
-FONT_NAME = "微軟正黑體"
-FONT_SIZE = 30
+def alison_complete_audit(file):
+    fname = file.name
+    mode = None
+    
+    # --- 2. 模式判定 (包含新北幼兒園、小學、暖禾輕食) ---
+    if any(kw in fname for kw in ["小學", "幼兒園", "幼兒"]):
+        mode = "新北食品-教育學部"
+        nutri_indices = [9, 10, 11, 12, 13, 14, 15] # J-P 欄
+        data_indices = [1, 2, 3, 4, 5, 6, 7]
+    elif any(kw in fname for kw in ["輕食", "暖禾"]):
+        mode = "新北食品-輕食專區(暖禾)"
+        # 暖禾輕食座標校準：通常在 B-C 為主項，F-L 為營養分析
+        nutri_indices = [5, 6, 7, 8, 9, 10, 11] 
+        data_indices = [1, 2]
+    elif any(kw in fname for kw in ["美食街", "素食"]):
+        mode = "新北食品-美食/素食區"
+        nutri_indices = [3, 4, 5, 6, 7]
+        data_indices = [3, 4, 5, 6, 7]
+    
+    if mode is None:
+        return None, "BLOCK", None
 
-# 樣式定義
-PORTION_STYLE = {"fill": PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid"), "font": Font(name=FONT_NAME, size=FONT_SIZE, color="FFFFFF", bold=True)}
-CALORIE_STYLE = {"fill": PatternFill(start_color="FFCCFF", end_color="FFCCFF", fill_type="solid"), "font": Font(name=FONT_NAME, size=FONT_SIZE, color="800000", bold=True)}
-REPEAT_STYLE  = {"fill": PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"), "font": Font(name=FONT_NAME, size=FONT_SIZE, color="FF0000", bold=True)}
-SPICY_STYLE   = {"fill": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"), "font": Font(name=FONT_NAME, size=FONT_SIZE, color="000000", bold=True)}
+    # --- 3. 執行稽核 ---
+    wb = load_workbook(file)
+    sheets_df = pd.read_excel(file, sheet_name=None, header=None)
+    logs = []
 
-# 食材肉種識別字典 (僅用於當天 A/B 餐避讓)
-MEAT_DICT = {"豬": ["豬", "肉絲", "肉片", "排骨", "焢肉", "培根", "火腿", "里肌"], "雞": ["雞", "翅", "鳳", "咔啦", "柳", "腿"], "牛": ["牛"], "魚": ["魚", "吻仔", "海鮮", "蝦"], "蛋": ["蛋"], "豆": ["豆", "腐", "干", "素肉"]}
-
-def get_meat(text):
-    if not text or "水果" in text or "Fruit" in text: return None
-    for key, words in MEAT_DICT.items():
-        if any(w in text for w in words): return key
-    return text[:2] if len(text) >= 2 else None
-
-def to_num(val):
-    try:
-        res = re.findall(r"\d+\.?\d*", str(val))
-        return float(res[0]) if res else 0.0
-    except: return 0.0
-
-def audit_process(file):
-    try:
-        wb = load_workbook(file)
-        sheets_df = pd.read_excel(file, sheet_name=None, header=None)
-        logs = []
-        output = BytesIO()
-
-        for sn, df in sheets_df.items():
-            df = df.fillna("")
-            ws = wb[sn]
-            # 定位日期列
-            d_row = next((i for i, r in df.iterrows() if "日期Date" in str(r[2])), None)
-            if d_row is None: continue
-
-            for col in range(3, 8): # 週一到週五
-                if col >= len(df.columns): break
+    for sn, df in sheets_df.items():
+        ws = wb[sn]
+        # 只處理 NaN，保留 0 和 0.0
+        df_audit = df.astype(str).replace(['nan', 'NaN', 'None'], '')
+        
+        for r_idx in range(len(df_audit)):
+            label = str(df_audit.iloc[r_idx, 0]).strip()
+            
+            # 日期行判定 (格式如: 1/05 (一))
+            if "/" in label and "(" in label:
+                # A. 營養成分全檢 (Alison 鐵律: 0 不是空白)
+                has_content = any(df_audit.iloc[r_idx, c].strip() != "" for c in data_indices if c < len(df_audit.columns))
                 
-                date_str = str(df.iloc[d_row, col]).split(" ")[0]
-                if "202" not in date_str: continue
-                
-                # 安全讀取星期名稱
-                day_name = str(df.iloc[d_row+1, col]) if (d_row+1) < len(df) else ""
+                if has_content:
+                    for n_idx in nutri_indices:
+                        if n_idx >= len(df_audit.columns): continue
+                        val = df_audit.iloc[r_idx, n_idx].strip()
+                        
+                        # 只有當格完全沒有字(真空)時才噴黑
+                        if val == "":
+                            cell = ws.cell(row=r_idx+1, column=n_idx+1)
+                            cell.fill, cell.font = STYLE_ERR["fill"], STYLE_ERR["font"]
+                            cell.value = "❌漏填數據"
+                            logs.append({"分頁": sn, "日期": label, "缺失": f"欄位 {n_idx+1} 營養數據漏填"})
 
-                # --- 1. 營養標示審核 (法規要求) ---
-                for r_idx in range(d_row + 10, len(df)):
-                    label = str(df.iloc[r_idx, 2])
-                    val = to_num(df.iloc[r_idx, col])
-                    cell = ws.cell(row=r_idx+1, column=col+1)
-                    
-                    if "熱量" in label and (val < 750 or val > 850):
-                        cell.fill, cell.font = CALORIE_STYLE["fill"], CALORIE_STYLE["font"]
-                        logs.append({"分頁": sn, "日期": date_str, "項目": "熱量", "原因": f"粉底：{val} Kcal"})
-                    elif any(x in label for x in ["全榖", "豆魚", "蔬菜"]):
-                        std = 2.0 if "蔬菜" in label else 4.0
-                        if val < std:
-                            cell.fill, cell.font = PORTION_STYLE["fill"], PORTION_STYLE["font"]
-                            logs.append({"分頁": sn, "日期": date_str, "項目": label, "原因": "紅底白字：份數不足"})
+                # B. 垂直菜名黑洞檢查 (防止明細有字但菜名空白)
+                for d_idx in data_indices:
+                    if d_idx >= len(df_audit.columns): continue
+                    if df_audit.iloc[r_idx, d_idx] == "":
+                        try:
+                            # 檢查下一列(明細列)是否有字
+                            if df_audit.iloc[r_idx+1, d_idx] != "":
+                                cell = ws.cell(row=r_idx+1, column=d_idx+1)
+                                cell.fill, cell.font = STYLE_ERR["fill"], STYLE_ERR["font"]
+                                cell.value = "❌漏填菜名"
+                                logs.append({"分頁": sn, "日期": label, "缺失": "有明細無菜名"})
+                        except: pass
 
-                # --- 2. 食材重複性審核 (僅限 A/B 餐道避讓) ---
-                main_A_idx = d_row + 3
-                meat_A = get_meat(str(df.iloc[main_A_idx, col])) if main_A_idx < len(df) else None
-                
-                label_B = next((i for i in range(d_row+5, len(df)) if "輕食B餐" in str(df.iloc[i, 2])), None)
-                main_B_idx = label_B + 1 if label_B else None
-                meat_B = get_meat(str(df.iloc[main_B_idx, col])) if main_B_idx and main_B_idx < len(df) else None
+    output = BytesIO()
+    wb.save(output)
+    return logs, mode, output.getvalue()
 
-                if meat_A and meat_B and meat_A == meat_B:
-                    for r in [main_A_idx, main_B_idx]:
-                        if r and r < len(df):
-                            c = ws.cell(row=r+1, column=col+1)
-                            c.fill, c.font = REPEAT_STYLE["fill"], REPEAT_STYLE["font"]
-                    logs.append({"分頁": sn, "日期": date_str, "項目": "餐道衝突", "原因": f"黃底紅字：A/B餐主食肉種重複({meat_A})"})
+# --- 4. Streamlit 介面 (Alison 專屬 UI) ---
+st.set_page_config(page_title="新北食品稽核系統", layout="wide")
+st.title(ST_TITLE)
+st.caption(ST_AUTHOR)
 
-                # --- 3. 禁辣原則審核 ---
-                if any(day in day_name for day in ["週一", "週二", "週四"]):
-                    for r_idx in range(d_row + 2, d_row + 12):
-                        if r_idx >= len(df) or "水果" in str(df.iloc[r_idx, 2]): continue
-                        txt = str(df.iloc[r_idx, col])
-                        if "●" in txt or "🌶️" in txt:
-                            cell = ws.cell(row=r_idx+1, column=col+1)
-                            cell.fill, cell.font = SPICY_STYLE["fill"], SPICY_STYLE["font"]
-                            logs.append({"分頁": sn, "日期": date_str, "項目": "禁辣日", "原因": "淺綠底：違規標辣"})
+uploaded = st.file_uploader("📂 上傳菜單 Excel (支援暖禾輕食/小學/幼兒園/美食街)", type=["xlsx"])
 
-        wb.save(output)
-        return logs, output.getvalue()
-    except Exception as e:
-        return [f"發生錯誤：{str(e)}"], None
-
-# --- 介面呈現 ---
-st.title("🛡️ 輕食區(一月初) 菜單自主稽核系統")
-st.caption("製作者：Alison")
-st.markdown("---")
-
-up = st.file_uploader("👉 上傳菜單 Excel", type=["xlsx"])
-if up:
-    with st.spinner("稽核中..."):
-        results, data = audit_process(up)
-        if data:
-            if results:
-                st.error(f"🚩 偵測到 {len(results)} 項異常")
-                st.download_button("📥 下載退件標註檔", data, f"稽核結果_{up.name}")
-                st.table(pd.DataFrame(results))
-            else:
-                st.success("🎉 通過所有稽核項目！")
+if uploaded:
+    logs, detected_mode, excel_file = alison_complete_audit(uploaded)
+    
+    if detected_mode == "BLOCK":
+        st.error(f"❌ 拒絕審核：『{uploaded.name}』檔名不符規範。請確認包含關鍵字。")
+    else:
+        st.info(f"✅ 模式識別成功：{detected_mode}")
+        if logs:
+            st.warning(f"🚩 發現 {len(logs)} 處數據真空缺失 (不包含數值為 0 之項目)")
+            st.table(pd.DataFrame(logs))
+            st.download_button("📥 下載 Alison 標註退件檔", excel_file, f"退件_{uploaded.name}")
         else:
-            st.error(results[0])
+            st.success("🎉 完美！所有數值（含 0）填寫均完整且對位正確。")
